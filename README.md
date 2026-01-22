@@ -242,7 +242,7 @@ m-ftracert/
 - [Frida](https://frida.re/) - 强大的动态插桩框架
 - [Tauri](https://tauri.app/) - 现代化的桌面应用框架
 - [React](https://react.dev/) - 优秀的 UI 框架
-
+- [ZenTracer](https://github.com/hluwa/ZenTracer) - an android method tracer gui tool base-on frida
 ---
 
 <div align="center">
