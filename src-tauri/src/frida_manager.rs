@@ -64,6 +64,14 @@ impl FridaManager {
 
         cmd.stdout(Stdio::piped());
         cmd.stderr(Stdio::piped());
+        
+        // Windows: 隐藏控制台窗口
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            const CREATE_NO_WINDOW: u32 = 0x08000000;
+            cmd.creation_flags(CREATE_NO_WINDOW);
+        }
 
         Ok(cmd)
     }
