@@ -65,6 +65,13 @@ impl FridaManager {
         cmd.stdout(Stdio::piped());
         cmd.stderr(Stdio::piped());
         
+        // 设置环境变量以支持 UTF-8
+        #[cfg(windows)]
+        {
+            cmd.env("PYTHONIOENCODING", "utf-8");
+            cmd.env("PYTHONUTF8", "1");
+        }
+        
         // Windows: 隐藏控制台窗口
         #[cfg(windows)]
         {

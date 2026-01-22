@@ -79,9 +79,6 @@ function traceClass(clsname) {{
                         var fullMethodName = clsname + "." + methodName + proto;
                         log("hooking: " + fullMethodName);
                         
-                        // 保存原始实现的引用
-                        var originalImpl = overload.implementation;
-                        
                         overload.implementation = function () {{
                             var args = [];
                             var tid = getTid();
@@ -136,11 +133,9 @@ function match(ex, text) {{
     
     try {{
         // 转义正则表达式中的特殊字符（除了 * 和 .）
-        // 将 .* 转换为正则表达式的 .*
-        // 将单独的 . 转义为 \.
         var regexPattern = ex
-            .replace(/\./g, '\\.')  // 先转义所有点
-            .replace(/\\\.\*/g, '.*');  // 然后将 \.\* 还原为 .*
+            .replace(/\./g, '\\.')
+            .replace(/\\\.\*/g, '.*');
         
         var regex = new RegExp(regexPattern);
         return regex.test(text);
@@ -150,24 +145,59 @@ function match(ex, text) {{
     }}
 }}
 
+// 枚举应用自己的类（借鉴 r0tracer）
+function enumerateAppClasses(callback) {{
+    Java.enumerateClassLoaders({{
+        onMatch: function(loader) {{
+            try {{
+                // 查找应用的 ClassLoader
+                if (loader.toString().indexOf("PathClassLoader") >= 0) {{
+                    Java.classFactory.loader = loader;
+                    
+                    var BaseDexClassLoader = Java.use("dalvik.system.BaseDexClassLoader");
+                    var pathcl = Java.cast(loader, BaseDexClassLoader);
+                    var DexPathList = Java.use("dalvik.system.DexPathList");
+                    var dexPathList = Java.cast(pathcl.pathList.value, DexPathList);
+                    var DexFile = Java.use("dalvik.system.DexFile");
+                    var Element = Java.use("dalvik.system.DexPathList$Element");
+                    
+                    for (var i = 0; i < dexPathList.dexElements.value.length; i++) {{
+                        var element = Java.cast(dexPathList.dexElements.value[i], Element);
+                        if (element.dexFile.value) {{
+                            var dexFile = Java.cast(element.dexFile.value, DexFile);
+                            var mcookie = dexFile.mCookie.value;
+                            if (dexFile.mInternalCookie.value) {{
+                                mcookie = dexFile.mInternalCookie.value;
+                            }}
+                            
+                            try {{
+                                var classNames = element.dexFile.value.getClassNameList(mcookie);
+                                for (var j = 0; j < classNames.length; j++) {{
+                                    callback(classNames[j]);
+                                }}
+                            }} catch (e) {{
+                                // 继续处理下一个
+                            }}
+                        }}
+                    }}
+                }}
+            }} catch (e) {{
+                // 继续处理下一个 ClassLoader
+            }}
+        }},
+        onComplete: function() {{}}
+    }});
+}}
+
 if (Java.available) {{
     Java.perform(function () {{
         log('M-FTracert Start...');
-        
-        // 禁用 ART 优化，确保 hook 能立即生效
-        try {{
-            Java.deoptimizeEverything();
-            log("ART optimization disabled for better hooking");
-        }} catch (e) {{
-            log("Failed to disable ART optimization: " + e);
-        }}
         
         var matchRegEx = {match_regex};
         var blackRegEx = {black_regex};
         var hookedClasses = {{}};
         
         function tryHookClass(aClass) {{
-            // 避免重复 hook
             if (hookedClasses[aClass]) {{
                 return false;
             }}
@@ -194,73 +224,29 @@ if (Java.available) {{
             return false;
         }}
         
-        function enumerateAndHook() {{
-            var count = 0;
-            var checked = 0;
-            Java.enumerateLoadedClasses({{
-                onMatch: function (aClass) {{
-                    checked++;
-                    if (tryHookClass(aClass)) {{
-                        count++;
-                    }}
-                }},
-                onComplete: function () {{
-                    log("Checked " + checked + " classes, hooked " + count + " classes in this round");
+        var count = 0;
+        
+        // 方法1：枚举应用自己的类（更可靠）
+        log("Enumerating app classes from DEX...");
+        enumerateAppClasses(function(className) {{
+            if (tryHookClass(className)) {{
+                count++;
+            }}
+        }});
+        
+        // 方法2：枚举已加载的类（作为补充）
+        log("Enumerating loaded classes...");
+        Java.enumerateLoadedClasses({{
+            onMatch: function (aClass) {{
+                if (tryHookClass(aClass)) {{
+                    count++;
                 }}
-            }});
-            return count;
-        }}
-        
-        // 第一次枚举
-        var initialCount = enumerateAndHook();
-        log("Initial enumeration complete. Hooked " + initialCount + " classes.");
-        
-        // 强制刷新所有已 hook 的类
-        try {{
-            Java.deoptimizeBootImage();
-            log("Boot image deoptimized");
-        }} catch (e) {{
-            // 忽略错误
-        }}
-        
-        // 延迟重新枚举，捕获延迟加载的类
-        setTimeout(function() {{
-            log("Re-enumerating classes after 3 seconds...");
-            var newCount = enumerateAndHook();
-            if (newCount > 0) {{
-                log("Found and hooked " + newCount + " new classes");
+            }},
+            onComplete: function () {{
+                log("Hooked " + count + " classes total");
+                log("M-FTracert ready. Monitoring for method calls...");
             }}
-        }}, 3000);
-        
-        // 再次延迟枚举
-        setTimeout(function() {{
-            log("Re-enumerating classes after 8 seconds...");
-            var newCount = enumerateAndHook();
-            if (newCount > 0) {{
-                log("Found and hooked " + newCount + " new classes");
-            }}
-            log("All hooks installed and ready!");
-        }}, 8000);
-        
-        // 监听新加载的类（备用方案）
-        try {{
-            var DexClassLoader = Java.use("dalvik.system.BaseDexClassLoader");
-            var originalLoadClass = DexClassLoader.loadClass.overload("java.lang.String");
-            originalLoadClass.implementation = function(className) {{
-                var result = originalLoadClass.call(this, className);
-                // 异步尝试 hook，避免阻塞类加载
-                setTimeout(function() {{
-                    tryHookClass(className);
-                }}, 10);
-                return result;
-            }};
-            log("ClassLoader monitor installed");
-        }} catch (e) {{
-            log("ClassLoader monitor failed: " + e);
-        }}
-        
-        log("M-FTracert ready. Monitoring for method calls...");
-        log("IMPORTANT: Wait at least 10 seconds before testing to ensure all hooks are active!");
+        }});
     }});
 }}
 "#, match_regex = match_regex, black_regex = black_regex)
