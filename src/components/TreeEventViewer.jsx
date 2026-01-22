@@ -519,12 +519,23 @@ export function TreeEventViewer({ events, onClear }) {
 
   // 获取过滤后的树
   const getFilteredTrees = () => {
+    // 如果没有搜索文本，返回所有树
     if (!searchText.trim()) return threadTrees;
     
+    // 如果在 System Hooks 标签页，不应用搜索过滤
+    if (activeTab === "hooks") return threadTrees;
+    
+    // 只对 Method Calls 标签页应用搜索
     const searchLower = searchText.toLowerCase();
     const filtered = {};
     
     Object.entries(threadTrees).forEach(([key, tree]) => {
+      // 跳过 logs（System Hooks）
+      if (key === "logs") {
+        filtered[key] = tree;
+        return;
+      }
+      
       const filteredNodes = filterTree(tree.rootNodes, searchLower);
       if (filteredNodes.length > 0) {
         filtered[key] = {
