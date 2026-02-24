@@ -17,8 +17,58 @@ pub type FridaManagerState = Arc<Mutex<FridaManager>>;
 pub type ActiveFridaProcess = Arc<Mutex<Option<std::process::Child>>>;
 
 #[tauri::command]
+pub async fn get_adb_devices() -> Result<Vec<String>, String> {
+    let mut cmd = std::process::Command::new("adb");
+    cmd.arg("devices");
+    
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    
+    let output = tokio::task::spawn_blocking(move || cmd.output())
+        .await
+        .map_err(|e| format!("Task error: {}", e))?
+        .map_err(|e| format!("Failed to execute adb: {}", e))?;
+    
+    if !output.status.success() {
+        return Err("Failed to get device list".to_string());
+    }
+    
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let mut devices = Vec::new();
+    
+    for line in stdout.lines().skip(1) {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if parts.len() >= 2 && parts[1] == "device" {
+            devices.push(parts[0].to_string());
+        }
+    }
+    
+    Ok(devices)
+}
+
+
+#[tauri::command]
 pub fn check_frida_installation(frida_manager: State<FridaManagerState>) -> Result<FridaConfig, String> {
     let manager = frida_manager.lock().unwrap();
+    
+    // 检查 adb 是否可用
+    let adb_available = std::process::Command::new("adb")
+        .arg("version")
+        .output()
+        .is_ok();
+    
+    if !adb_available {
+        return Err("ADB not found. Please install Android SDK Platform Tools and add adb to PATH.".to_string());
+    }
     
     Ok(FridaConfig {
         frida_path: manager.config.frida_path.clone(),
@@ -71,24 +121,22 @@ pub async fn refresh_processes(
     process_list: State<'_, ProcessList>,
     frida_manager: State<'_, FridaManagerState>,
 ) -> Result<Vec<Process>, String> {
-    // Clone config to avoid holding lock across await
-    let (frida_ps_path, device_id) = {
+    // 使用 adb 获取进程列表
+    let device_id = {
         let manager = frida_manager.lock().unwrap();
-        match (manager.get_frida_ps_path(), manager.config.device_id.clone()) {
-            (Ok(path), device) => (path, device.unwrap_or_else(|| "usb".to_string())),
-            (Err(e), _) => return Err(e),
-        }
+        manager.config.device_id.clone().unwrap_or_else(|| "".to_string())
     };
     
-    // Execute frida-ps without holding the lock
-    let mut cmd = std::process::Command::new(&frida_ps_path);
+    // 构建 adb 命令
+    let mut cmd = std::process::Command::new("adb");
     
-    if device_id == "usb" || device_id == "U" {
-        cmd.arg("-U");
-    } else {
-        cmd.arg("-D").arg(&device_id);
+    // 如果指定了设备 ID 且不是 "usb" 或 "U"，则添加 -s 参数
+    if !device_id.is_empty() && device_id != "usb" && device_id != "U" {
+        cmd.arg("-s").arg(&device_id);
     }
-    cmd.arg("-a");
+    
+    // 执行 ps 命令获取进程列表
+    cmd.args(&["shell", "ps"]);
     
     #[cfg(windows)]
     {
@@ -100,50 +148,57 @@ pub async fn refresh_processes(
     let output = tokio::task::spawn_blocking(move || cmd.output())
         .await
         .map_err(|e| format!("Task error: {}", e))?
-        .map_err(|e| format!("Failed to execute frida-ps: {}", e))?;
+        .map_err(|e| format!("Failed to execute adb: {}. Make sure adb is installed and in PATH.", e))?;
     
     if !output.status.success() {
         let error = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("frida-ps failed: {}", error));
+        return Err(format!("adb command failed: {}", error));
     }
     
-    // Parse output
-    let stdout = if cfg!(windows) {
-        match String::from_utf8(output.stdout.clone()) {
-            Ok(s) => s,
-            Err(_) => {
-                use encoding_rs::GBK;
-                let (decoded, _, _) = GBK.decode(&output.stdout);
-                decoded.to_string()
-            }
-        }
-    } else {
-        String::from_utf8_lossy(&output.stdout).to_string()
-    };
+    // 解析输出
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
     
     let mut processes = Vec::new();
-    for line in stdout.lines().skip(1) {
+    let lines: Vec<&str> = stdout.lines().collect();
+    
+    if lines.is_empty() {
+        return Err("No output from adb ps command".to_string());
+    }
+    
+    // 跳过标题行，解析进程信息
+    // ps 输出格式通常是: USER PID PPID VSZ RSS WCHAN PC NAME
+    for line in lines.iter().skip(1) {
         let line = line.trim();
         if line.is_empty() {
             continue;
         }
         
         let parts: Vec<&str> = line.split_whitespace().collect();
-        if parts.len() >= 2 {
-            if let Ok(pid) = parts[0].parse::<u32>() {
-                let name = parts[1..].join(" ");
-                processes.push(Process {
-                    pid,
-                    name: name.clone(),
-                    package: Some(name),
-                });
+        // 至少需要 PID 和 NAME 字段
+        if parts.len() >= 9 {
+            // PID 在第二列（索引1）
+            if let Ok(pid) = parts[1].parse::<u32>() {
+                // NAME 在最后一列（索引8）
+                let name = parts[8].to_string();
+                
+                // 只显示应用进程（包名格式）
+                if name.contains('.') {
+                    processes.push(Process {
+                        pid,
+                        name: name.clone(),
+                        package: Some(name),
+                    });
+                }
             }
         }
     }
     
     if processes.is_empty() {
-        return Err("No processes found. Make sure frida-server is running.".to_string());
+        return Err("No application processes found. Make sure the device is connected.".to_string());
     }
+    
+    // 按包名排序
+    processes.sort_by(|a, b| a.name.cmp(&b.name));
     
     let mut list = process_list.lock().unwrap();
     *list = processes.clone();

@@ -132,7 +132,7 @@ export function useFridaTracer() {
       console.error("Failed to refresh processes:", error);
       // 只在第一次失败且没有进程时显示警告
       if (processes.length === 0) {
-        const errorMsg = `Frida 连接失败: ${error}\n\n请确保:\n1. Frida 已安装且路径配置正确\n2. Android 设备/模拟器已连接\n3. frida-server 在设备上运行\n4. 设备 ID 配置正确 (当前: ${deviceId})`;
+        const errorMsg = `进程列表获取失败: ${error}\n\n请确保:\n1. ADB 已安装且在 PATH 中\n2. Android 设备/模拟器已连接 (adb devices)\n3. USB 调试已开启\n4. 设备 ID 配置正确 (当前: ${deviceId})`;
         console.warn(errorMsg);
       }
     } finally {
